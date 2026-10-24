@@ -4,7 +4,7 @@ speech_who.py — speech verbs in inquits × speaker (@who) × addressee (@toWho
 for the Digital Dostoevsky TEI of «Преступление и наказание».
 
 Requires inquit_gender.py (version 2: analyse, sync_categories, compare,
-plot_rest, plot_scatter, plot_diff, plot_manner) in the same folder.
+plot_rest, plot_scatter, plot_diff) in the same folder.
 """
 from __future__ import annotations
 
@@ -311,9 +311,9 @@ def plot_speaker_verbs(inq, keep, lab, out, top_verbs=25):
     cols = ct.sum().nlargest(top_verbs).index
     fig, ax = plt.subplots(figsize=(0.55 * len(cols) + 4, 0.45 * len(keep) + 2))
     sns.heatmap(share[cols], annot=annot_pct(share[cols]), fmt="", cmap="YlGnBu", ax=ax,
-                cbar_kws={"label": "% ремарок персонажа"})
+                cbar_kws={"label": "% remarks of the character"})
     ax.set_yticklabels([f"{lab(s)} ({int(ct.loc[s].sum())})" for s in keep], rotation=0)
-    ax.set(xlabel="", ylabel="", title="Глаголы ремарок по говорящему (@who)")
+    ax.set(xlabel="", ylabel="", title="Verbs used in the remarks per character (@who)")
     save(fig, out, "11_speaker_verbs.png")
 
 
@@ -332,8 +332,8 @@ def plot_speaker_categories(inq, keep, lab, out):
     sns.heatmap(res, annot=True, fmt=".1f", cmap="coolwarm", center=0, ax=axes[1])
     for ax in axes:
         ax.set_yticklabels([lab(s) for s in tab.index], rotation=0); ax.set_ylabel("")
-    axes[0].set_title("Доля категории, %")
-    axes[1].set_title(f"Стандартизованные остатки (χ²={chi2:.0f}, p={p:.2g})")
+    axes[0].set_title("Share, %")
+    axes[1].set_title(f"Rest (χ²={chi2:.0f}, p={p:.2g})")
     save(fig, out, "12_speaker_categories.png")
 
 
@@ -351,7 +351,7 @@ def plot_keyness(k, keep, lab, out, top=6, qmax=0.1):
         ax.set_title(f"{lab(s)} (n={n})", fontsize=10)
     for ax in axes.flat[len(keep):]:
         ax.axis("off")
-    fig.suptitle(f"Характерные глаголы (log2 ratio vs остальные); красные — q<{qmax}")
+    fig.suptitle(f"'Key/favorite' verbs (log2 ratio vs rest); red — q < {qmax}")
     save(fig, out, "13_speaker_keyness.png")
 
 
@@ -363,12 +363,12 @@ def plot_addressees(ua, keep, lab, out, top_addr=12):
     share = (m.div(m.sum(1), axis=0)[cols] * 100).reindex(keep).fillna(0)
     fig, ax = plt.subplots(figsize=(0.7 * len(cols) + 4, 0.45 * len(keep) + 2))
     sns.heatmap(share, annot=annot_pct(share), fmt="", cmap="OrRd", ax=ax,
-                cbar_kws={"label": "% реплик говорящего"})
+                cbar_kws={"label": "% utterances"})
     ax.set_xticklabels([lab(c) for c in cols], rotation=45, ha="right")
     ax.set_yticklabels([f"{lab(s)} ({int(m.loc[s].sum()) if s in m.index else 0})"
                         for s in keep], rotation=0)
-    ax.set(xlabel="адресат (@toWhom)", ylabel="говорящий (@who)",
-           title="Кому адресованы реплики (все <said>, не только с ремарками)")
+    ax.set(xlabel="addressee (@toWhom)", ylabel="speaker (@who)",
+           title="Who the utterance is addressed to (all instances of dir speech)")
     save(fig, out, "14_addressee_matrix.png")
 
 
@@ -396,17 +396,17 @@ def plot_network(ua, nodes, lab, persons, out, min_w=5):
                            node_color=[SEXCOL[SEX.get(persons.get(n, {}).get("sex"), "other")]
                                        for n in G])
     nx.draw_networkx_labels(G, pos, {n: lab(n) for n in G}, font_size=9, ax=ax)
-    ax.set_title(f"Кто с кем говорит (рёбра ≥ {min_w} реплик; толщина — число реплик)")
+    ax.set_title(f"Who speaks to whom (edges ≥ {min_w} utterances; weight — utterance count)")
     ax.axis("off"); save(fig, out, "15_network.png")
 
 
 def plot_profiles(utts, keep, lab, out):
     g = utts[utts.speaker.isin(keep)].groupby("speaker")
     prof = pd.DataFrame({
-        "реплик": g.size(),
-        "с ремаркой автора, %": g["has_inquit"].mean() * 100,
-        "про себя (aloud=false), %": g["aloud"].apply(lambda s: (s == "false").mean() * 100),
-        "к себе (who=toWhom), %": g["self_addr"].mean() * 100,
+        "utterances": g.size(),
+        "with remarks, %": g["has_inquit"].mean() * 100,
+        "think to themselves (aloud=false), %": g["aloud"].apply(lambda s: (s == "false").mean() * 100),
+        "talk to themselves (who=toWhom), %": g["self_addr"].mean() * 100,
     }).reindex(keep)
     prof.rename(index=lab).to_csv(out / "speaker_profiles.csv")
     fig, axes = plt.subplots(1, 4, figsize=(18, 0.4 * len(keep) + 2), sharey=True)
@@ -426,8 +426,8 @@ def plot_speaker_rarefaction(inq, keep, lab, out, cap=300, reps=50):
         sizes = np.unique(np.linspace(5, min(len(pool), cap), 15).astype(int))
         ax.plot(sizes, [np.mean([len(set(rng.choice(pool, n, replace=False)))
                                  for _ in range(reps)]) for n in sizes], label=lab(s))
-    ax.set(xlabel="ремарок в выборке", ylabel="разных глаголов",
-           title="Лексическое разнообразие ремарок по говорящему (кривые разрежения)")
+    ax.set(xlabel="remarks in the sample", ylabel="diff verb lemmas",
+           title="Lexicon richness")
     ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=8)
     save(fig, out, "17_speaker_rarefaction.png")
 
@@ -436,10 +436,10 @@ def plot_focus(ia, focus, lab, out, mode, top_rows=7, top_verbs=15):
     """mode='from': focus speaker's verbs by addressee; 'to': verbs of others addressing focus."""
     if mode == "from":
         d, key = ia[ia.speaker == focus], "addr"
-        title = f"{lab(focus)}: глаголы ремарок по адресатам"
+        title = f"{lab(focus)}: remark verbs per addressees"
     else:
         d, key = ia[(ia.addr == focus) & (ia.speaker != focus)], "speaker"
-        title = f"Как вводятся реплики, обращённые к: {lab(focus)}"
+        title = f"Remarks which accompany the utterances addressed to: {lab(focus)}"
     if d.empty:
         logging.info("plot_focus(%s, %s): no data", focus, mode); return
     rows = d.groupby(key).w.sum().nlargest(top_rows).index
@@ -451,9 +451,9 @@ def plot_focus(ia, focus, lab, out, mode, top_rows=7, top_verbs=15):
     share = m.div(m.sum(1), axis=0)[cols] * 100
     fig, ax = plt.subplots(figsize=(0.6 * len(cols) + 4, 0.5 * len(rows) + 2))
     sns.heatmap(share, annot=annot_pct(share), fmt="", cmap="YlOrBr", ax=ax,
-                cbar_kws={"label": "% ремарок строки"})
+                cbar_kws={"label": "% remarks"})
     ax.set_yticklabels([f"{lab(r)} ({m.loc[r].sum():.0f})" for r in rows], rotation=0)
-    ax.set(xlabel="", ylabel="адресат" if mode == "from" else "говорящий", title=title)
+    ax.set(xlabel="", ylabel="addressee" if mode == "from" else "speaker", title=title)
     save(fig, out, f"18_{mode}_{focus}.png")
 
 
@@ -467,12 +467,11 @@ def plot_mode_verbs(inq, lab, out, focus=None, top_verbs=20):
     share = tab.div(tab.sum(1), axis=0)[cols] * 100
     fig, ax = plt.subplots(figsize=(0.55 * len(cols) + 4, 0.6 * len(tab) + 2))
     sns.heatmap(share, annot=annot_pct(share), fmt="", cmap="PuBu", ax=ax,
-                cbar_kws={"label": "% ремарок режима"})
+                cbar_kws={"label": "% remarks per speech mode"})
     ax.set_yticklabels([f"{m} ({int(tab.loc[m].sum())})" for m in share.index], rotation=0)
     who = "все говорящие" if focus is None else lab(focus)
-    ax.set(xlabel="", ylabel="", title=f"Глаголы по режиму речи — {who}")
+    ax.set(xlabel="", ylabel="", title=f"Verbs per speech mode — {who}")
     save(fig, out, f"19_mode_verbs{'_' + focus if focus else ''}.png")
-
 
 def plot_gender_dyads(ua, ia, persons, out):
     g = lambda pid: gender_of(pid, persons)
@@ -497,7 +496,7 @@ def plot_gender_dyads(ua, ia, persons, out):
 # ------------------------------------------------------------------ gender comparison via @who
 def run_gender_compare(inq, out, min_freq):
     """Reuse inquit_gender2.compare & plots with gender = speaker's TEI sex."""
-    from inquit_gender2 import compare, plot_rest, plot_scatter, plot_diff, plot_manner
+    from inquit_gender2 import compare, plot_rest, plot_scatter, plot_diff
     g_out = out / "gender_tei"; g_out.mkdir(exist_ok=True)
     df = inq.assign(chapter=inq.section,
                     layout=np.where(inq["mode"] == "реплика", "реплика", "внутр./себе"))
@@ -505,7 +504,6 @@ def run_gender_compare(inq, out, min_freq):
     plot_rest(df, t, mf, g_out)
     plot_scatter(t, g_out, min_freq)
     plot_diff(t, g_out, min_freq)
-    plot_manner(df, g_out)
 
 
 # ------------------------------------------------------------------ main

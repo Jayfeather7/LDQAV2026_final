@@ -392,15 +392,15 @@ def plot_scatter(t, out, min_freq, seed=0):
     except ImportError:
         pass
     ax.set(xscale="log", yscale="log", xlabel="masc, ‰", ylabel="femn, ‰",
-           title=f"Общие глаголы ({len(sh)}); выше диагонали — чаще в женских ремарках")
+           title=f"Shared verbs ({len(sh)}); above the diagonal — more frequent in femn remarks")
 
     om = t[t.status == "only_masc"].masc.nlargest(12)
     of = t[t.status == "only_femn"].femn.nlargest(12)
     ex = pd.concat([-om.sort_values(ascending=False), of.sort_values()])
     ax2.barh(ex.index, ex.values, color=[COL["masc"] if v < 0 else COL["femn"] for v in ex])
     ax2.axvline(0, color="k", lw=.6)
-    ax2.set(xlabel="абс. частота   ← только masc | только femn →",
-            title=f"Эксклюзивные глаголы (masc: {(t.status == 'only_masc').sum()}, "
+    ax2.set(xlabel="abs frequency   ← excl. masc | excl. femn →",
+            title=f"Exclusive verbs (masc: {(t.status == 'only_masc').sum()}, "
                   f"femn: {(t.status == 'only_femn').sum()} типов)")
     fig.tight_layout(); fig.savefig(out / "02_scatter_exclusive.png", dpi=200); plt.close(fig)
 
@@ -417,35 +417,9 @@ def plot_diff(t, out, min_freq):
                c=[COL["femn"] if v > 0 else COL["masc"] for v in d.diff_pm],
                edgecolor="k", linewidths=np.where(sig, .8, 0))
     ax.set_yticks(y, d.index); ax.axvline(0, color="k", lw=.6)
-    ax.set(xlabel="разница, на 1000 ремарок (femn − masc); 95% бутстреп-ДИ по главам",
-           title=f"Глаголы с частотой ≥ {min_freq}; крупные точки — q < 0.05 (Fisher + BH)")
+    ax.set(xlabel="diff, per 1000 remarks (femn − masc); 95% bootstrap CI per chapter",
+           title=f"Verbs with frequency ≥ {min_freq}; larger data points — q < 0.05 (Fisher + BH)")
     fig.tight_layout(); fig.savefig(out / "03_difference.png", dpi=200); plt.close(fig)
-
-
-def plot_manner(df, out, top=15):
-    mf = df[df.gender.isin(["masc", "femn"])]
-    N = mf.gender.value_counts().reindex(["masc", "femn"])
-    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
-    for ax, col in zip(axes, ("adverbs", "gerunds")):
-        s = mf[["gender"]].assign(w=mf[col].fillna("").str.split()).explode("w").dropna()
-        vdrug = (s.w == "вдруг").groupby(s.gender).sum().reindex(N.index, fill_value=0) / N * 1000
-        if col == "adverbs":
-            s = s[~s.w.isin(NON_MANNER_ADV)]
-        tab = pd.crosstab(s.w, s.gender).reindex(columns=N.index, fill_value=0)
-        if tab.empty:
-            continue
-        pm = tab.div(N, axis=1) * 1000
-        sel = tab.sum(1).nlargest(top).index
-        long = pm.loc[sel].rename_axis("w").reset_index().melt(
-            id_vars="w", var_name="gender", value_name="pm")
-        sns.barplot(data=long, y="w", x="pm", hue="gender", palette=COL, ax=ax)
-        extra = (f" | «вдруг»: m={vdrug['masc']:.1f}‰, f={vdrug['femn']:.1f}‰"
-                 if col == "adverbs" else "")
-        ax.set(xlabel="на 1000 ремарок", ylabel="",
-               title=("Наречия образа действия" if col == "adverbs" else "Деепричастия")
-               + " при глаголе речи" + extra)
-    fig.tight_layout(); fig.savefig(out / "07_manner.png", dpi=200); plt.close(fig)
-
 
 def plot_rest(df, t, mf, out, top=20):
     """Former plots 01, 04 (only if categories exist), 05, 06."""
@@ -454,7 +428,7 @@ def plot_rest(df, t, mf, out, top=20):
     for ax, g in zip(axes, ("masc", "femn")):
         s = t[f"pm_{g}"][t[g] > 0].nlargest(top)
         sns.barplot(x=s.values, y=s.index, ax=ax, color=COL[g])
-        ax.set(title=f"{g}: топ-{top} (n={t[g].sum()})", xlabel="на 1000 ремарок", ylabel="")
+        ax.set(title=f"{g}: топ-{top} (n={t[g].sum()})", xlabel="per 1000 remarks", ylabel="")
     fig.tight_layout(); fig.savefig(out / "01_top_verbs.png", dpi=200); plt.close(fig)
 
     lab = mf[~mf.category.isin(["—", "не речь"])]
@@ -465,8 +439,8 @@ def plot_rest(df, t, mf, out, top=20):
         sns.heatmap(tab / tab.sum() * 100, annot=True, fmt=".1f", cmap="Blues", ax=axes[0])
         sns.heatmap((tab - exp) / np.sqrt(exp), annot=True, fmt=".1f", cmap="coolwarm",
                     center=0, ax=axes[1])
-        axes[0].set_title("Доля категории, %")
-        axes[1].set_title(f"Стандартизованные остатки (χ²={chi2:.1f}, p={p:.3g})")
+        axes[0].set_title("Category share, %")
+        axes[1].set_title(f"Rest (χ²={chi2:.1f}, p={p:.3g})")
         fig.tight_layout(); fig.savefig(out / "04_categories.png", dpi=200); plt.close(fig)
 
     rng = np.random.default_rng(42)
@@ -477,7 +451,7 @@ def plot_rest(df, t, mf, out, top=20):
         pool = mf.loc[mf.gender == g, "lemma"].to_numpy()
         ax.plot(sizes, [np.mean([len(set(rng.choice(pool, s, replace=False)))
                                  for _ in range(100)]) for s in sizes], label=g, color=COL[g])
-    ax.set(xlabel="размер выборки", ylabel="число типов", title="Кривая разрежения")
+    ax.set(xlabel="sample size", ylabel="type count", title="Lexicon richness")
     ax.legend(); fig.tight_layout(); fig.savefig(out / "05_rarefaction.png", dpi=200); plt.close(fig)
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -523,7 +497,6 @@ def main():
     plot_rest(df, t, mf, out)
     plot_scatter(t, out, args.min_freq)
     plot_diff(t, out, args.min_freq)
-    plot_manner(df, out)
     logging.info("Done: %s", out.resolve())
 
 if __name__ == "__main__":
