@@ -1,0 +1,47 @@
+alias,gender,character
+# one word per row, nominative, lowercase
+раскольников,M,Raskolnikov
+родя,M,Raskolnikov
+родион,M,Raskolnikov
+разумихин,M,Razumikhin
+мармеладов,M,Marmeladov
+свидригайлов,M,Svidrigailov
+аркадий,M,Svidrigailov
+лужин,M,Luzhin
+зосимов,M,Zosimov
+порфирий,M,Porfiry
+заметов,M,Zametov
+лебезятников,M,Lebezyatnikov
+андрей,M,Lebezyatnikov
+миколка,M,Nikolai
+николай,M,Nikolai
+митька,M,Mitka
+кох,M,Koch
+пестряков,M,Pestryakov
+душкин,M,Dushkin
+порох,M,Ilya Petrovich
+илья,M,Ilya Petrovich
+никодим,M,Nikodim Fomich
+катерина,F,Katerina Ivanovna
+соня,F,Sonya
+сонечка,F,Sonya
+софья,F,Sonya
+дуня,F,Dunya
+дунечка,F,Dunya
+авдотья,F,Dunya
+пульхерия,F,Pulcheria
+настасья,F,Nastasya
+алена,F,Alena Ivanovna
+лизавета,F,Lizaveta
+амалия,F,Amalia
+лавиза,F,Luiza Ivanovna
+луиза,F,Luiza Ivanovna
+полечка,F,Polya
+поленька,F,Polya
+поля,F,Polya
+прасковья,F,Praskovya
+пашенька,F,Praskovya
+марфа,F,Marfa Petrovna
+дарья,F,Darya Frantsevna
+параша,F,Parasha
+дуклида,F,Duklida

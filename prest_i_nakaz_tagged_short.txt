@@ -1,0 +1,1102 @@
+"""
+The main parser for the tagger. It takes a list of sections and returns a string of TEI markup is below:
+
+
+
+CLI for parsing raw text files from the corpus of the Digital Dostoevsky Project
+  and applying basic TEI markup.
+
+"""
+#!/usr/bin/env python3
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+from lxml import etree
+
+from direct_speech import markup_direct_speech
+from proper_names import markup_proper_names
+from parse_sections import parse_sections, markup_sections
+
+
+XML_PROCESSING_INSTRUCTIONS = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    """<?xml-model
+  href="http://www.tei-c.org/release/xml/tei/custom/schema/relaxng/tei_all.rng"
+  type="application/xml" schematypens="http://relaxng.org/ns/structure/1.0"?>""",
+    """<?xml-model
+  href="http://www.tei-c.org/release/xml/tei/custom/schema/relaxng/tei_all.rng"
+  type="application/xml" schematypens="http://purl.oclc.org/dsdl/schematron"?>""",
+]
+
+
+def create_tei_structure(text):
+    """Create TEI structure for the given text."""
+
+    return f"""\
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title></title>
+        <author/>
+      </titleStmt>
+      <editionStmt>
+        <edition/>
+        <respStmt>
+          <resp/>
+          <persName/>
+        </respStmt>
+      </editionStmt>
+      <publicationStmt/>
+      <sourceDesc/>
+    </fileDesc>
+  </teiHeader>
+  <text>
+      {text}
+  </text>
+</TEI>
+"""
+
+
+def format_tree(elem, indent="  ", level=0):
+    """Pretty-prints and indents a tree beautifully."""
+    i = "\n%s" % (level * indent)
+    if elem.tag == "{http://www.tei-c.org/ns/1.0}p":
+        return
+    if elem.tag == "{http://www.tei-c.org/ns/1.0}head":
+        return
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = "%s%s" % (i, indent)
+        for sub_elem in elem:
+            format_tree(sub_elem, indent, level + 1)
+            if not sub_elem.tail or not sub_elem.tail.strip():
+                sub_elem.tail = i
+            if sub_elem.getnext() is not None:
+                sub_elem.tail += indent
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+
+
+def main():
+    """Command-line entry-point."""
+
+    parser = argparse.ArgumentParser(description="Description: {}".format(__doc__))
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="Increase verbosity"
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", default=False, help="Quiet operation"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        action="store",
+        help="Output file (default: stdout)",
+    )
+    parser.add_argument(
+        "--rng-schema",
+        action="store",
+        help="RELAX NG schema to validate against (optional)",
+    )
+    parser.add_argument(
+        "--person-names-list",
+        action="store",
+        help="Line-by-line list of person names (optional)",
+    )
+    parser.add_argument(
+        "--place-names-list",
+        action="store",
+        help="Line-by-line list of place names (optional)",
+    )
+    parser.add_argument("input_text", action="store", help="Text to process")
+
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    log_level = logging.CRITICAL if args.quiet else log_level
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    logging.info("Processing input text: %s", args.input_text)
+
+    with Path(args.input_text).open("r", encoding="utf8") as _fh:
+        text = _fh.read()
+
+    text = markup_direct_speech(text)
+
+    if args.person_names_list:
+        with Path(args.person_names_list).open("rt", encoding="utf8") as _fh:
+            person_names = [line.strip() for line in _fh if line.strip()]
+        text = markup_proper_names(text, person_names, "persName")
+
+    if args.place_names_list:
+        with Path(args.place_names_list).open("rt", encoding="utf8") as _fh:
+            place_names = [line.strip() for line in _fh if line.strip()]
+        text = markup_proper_names(text, place_names, "placeName")
+
+    sections = parse_sections(text)
+    text = markup_sections(sections)
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = etree.fromstring(create_tei_structure(text).encode("utf8"))
+    format_tree(doc)
+
+    logging.info("Writing processed text to: %s", args.output or "stdout")
+
+    with output_path.open("wt", encoding="utf8") if args.output else sys.stdout as _fh:
+        _fh.write("\n".join(XML_PROCESSING_INSTRUCTIONS) + "\n")
+        _fh.write(etree.tostring(doc, pretty_print=True, encoding="unicode"))
+
+    if args.rng_schema:
+        logging.info("Validating against schema: {}".format(args.rng_schema))
+        relaxng_doc = etree.parse(args.rng_schema)
+        relaxng = etree.RelaxNG(relaxng_doc)
+        if not relaxng.validate(doc):
+            for entry in relaxng.error_log:
+                # Note: better validation errors are available with something like jing
+                if (
+                    entry.message == "Invalid attribute aloud for element said"
+                    or entry.line in [15, 16]
+                ):
+                    # these errors are expected, given that dummy values are used
+                    # -- only report if debug logging is enabled
+                    logging.debug(entry)
+                else:
+                    logging.warning(entry)
+
+
+if __name__ == "__main__":
+    main()
+
+"""
+direct_speech.py: This file contains the markup_direct_speech function, which is responsible for identifying and marking up direct speech in the text. It uses regular expressions to find patterns of direct speech and wraps them in appropriate TEI tags.
+"""
+import regex as re
+
+ATTRIBS = ["aloud", "direct", "who", "toWhom"]
+
+
+def markup_direct_speech(text: str) -> str:
+    """
+    Markup direct speech in the given text with <said/> tags.
+    See tests/test_direct_speech.py for examples.
+    """
+
+    # punctuation which can terminate an utterance (or part thereof)
+    p = "?!).»"
+
+    # designate two unicode "noncharacters" for use as temporary markers
+    start = "\uFFFE"
+    end = "\uFFFF"
+
+    text_out = []
+    for line in text.splitlines():
+
+        # mark text inside bounding straight double quotes
+        line = re.sub(r'«?"[^"\n]+"', rf"{start}\g<0>{end}", line)
+
+        line_out = line
+
+        # first pass for direct speech offset by an emdash
+        line_out = re.sub(
+            rf"""
+            (?<!{start})          # onset is not already marked
+            (?<!{end}\s)          # or follows immediately from a marked sequence
+
+            (?:(?:                # emdash-offset utterance
+                                  # -----------------------
+
+              (?<![,{p}\w]\s)     # emdash does not follow terminating punctuation
+              (—\s+)              # capture the emdash and any whitespace
+              (.+?)               # lazily capture everything up to...
+              (?=[,{p}]\s—|\n|$)  # terminating punctuation, a new emdash, or end of line
+
+            ) | (?:               # guillemet-offset utterance
+                                  # --------------------------
+
+              («)                 # capture the guillemet
+              ([^«]+?)            # lazily capture everything up to...
+              (?=
+                                  # an emdash if it's preceded by terminating punctuation
+                                  #  that's not itself preceded by a marked sequence
+                (?<!"|{end})[,{p}]\s—
+                |»(?!{end})       # or a guillemet (unless it closes a marked sequence)
+                |\n|$             # or end of line
+              )
+            ))
+            ([{p}])?              # capture any trailing terminating punctuation
+            """,
+            lambda m: "".join(
+                [
+                    (m.group(1).strip() + " " if m.group(1) else m.group(3)),
+                    start,
+                    (m.group(2) or m.group(4)),
+                    m.group(5) or "",
+                    end,
+                ]
+            ),
+            line_out,
+            flags=re.VERBOSE,
+        )
+
+        # second pass for utterances offset with emdash and that resume after
+        #  an inquit that terminates with a comma or a period
+        if (
+            # if there's already a marked utterance in this line
+            f"— {start}" in line_out
+            or re.search(rf"«{start}[^»]+{end}", line_out)
+            or re.match(rf"«{start}[^»]+»{end}", line_out)
+        ):
+            line_out = re.sub(
+                rf"""
+                                  # onset follows a marked utterance earlier in the line
+                (?<={end}[^{end}]+?) 
+                (?<!{end})        # onset does not immediately follow a marked utterance
+
+                ([,.])\s*         # capture a comma or period that terminates an inquit
+                —\s+              # match the emdash and any whitespace
+                (?!{start})       # unless the utterance is already marked
+                (.+?)             # lazily capture everything up to...
+                (?=
+                  [,{p}]\s—       # an emdash preceded by terminating punctuation
+                  |»(?!{end})     # or a guillemet (unless it closes a marked sequence)
+                  |\n|$           # or end of line
+                )
+                ([{p}]+)?         # capture any trailing terminating punctuation
+                """,
+                rf"\g<1> — {start}\g<2>\g<3>{end}",
+                line_out,
+                flags=re.VERBOSE,
+            )
+
+        # post-hoc
+        line_out = line_out.replace(f"«{start}", f"{start}«")
+        line_out = line_out.replace(f"».{end}", f"»{end}.")
+
+        # replace bounding guillemets with <said> tags
+        line_out = re.sub(
+            rf"(?<!{start})«.+?(»(?!{end})|\n|$)",
+            rf"{start}\g<0>{end}",
+            line_out,
+        )
+
+        # replace temporary markers with <said> tags
+        line_out = line_out.replace(
+            start, "<said {}>".format(" ".join(f'{k}=""' for k in ATTRIBS))
+        )
+        line_out = line_out.replace(end, "</said>")
+
+        text_out.append(line_out)
+
+    return "\n".join(text_out)
+
+
+if __name__ == "__main__":
+    # The following code is used for testing and development purposes only.
+    import sys
+
+    with open(sys.argv[1], "rt", encoding="utf8") as _fh:
+        text = _fh.read()
+
+    for line in text.splitlines():
+        marked_up_line = markup_direct_speech(line)
+        if line != marked_up_line:
+            print(line)
+            print(marked_up_line)
+            print()
+
+"""
+proper_names.py: This file contains the markup_proper_names function, which is responsible for identifying and marking up proper names in the text. It uses regular expressions to find occurrences of specified names and wraps them in appropriate TEI tags.
+
+"""
+
+import re
+
+
+def markup_proper_names(text, names, tag):
+
+    re_proper_names = re.compile(
+        rf"\b(?:{'|'.join(sorted(names, key=len, reverse=True))})\b"
+    )
+    text = re_proper_names.sub(rf"<{tag}>\g<0></{tag}>", text)
+
+    return text
+
+"""
+parse_sections.py: This file contains the parse_sections function, which is responsible for parsing the text into sections based on specific markers and returning a structured representation of those sections. It also includes the markup_sections function, which takes the structured sections and generates TEI markup for them.
+
+"""
+
+import logging
+import re
+
+
+def is_roman_numeral(text):
+    if not text:
+        return False
+    return all([c in "IVX" for c in text])
+
+
+def roman_to_arabic(s: str) -> int:
+    s = s.upper()
+    roman = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+    num = 0
+
+    for i in range(len(s) - 1):
+        if roman[s[i]] < roman[s[i + 1]]:
+            num += roman[s[i]] * -1
+            continue
+        num += roman[s[i]]
+    num += roman[s[-1]]
+
+    return num
+
+
+def parse_sections(text):
+    titles = ["div1", "div2", "chapter_title"]
+    first_section = True
+
+    sections = []
+    buffer = [""]  # ensure an empty line at the top of the document
+
+    section_numeral = None
+    for i, line in enumerate(text.splitlines()):
+        line = line.strip(" \t\n")
+        if is_roman_numeral(line):
+            sections.append({"numeral": section_numeral, "lines": buffer})
+            section_numeral = line
+            buffer = []
+        else:
+            buffer.append(line)
+    sections.append({"numeral": section_numeral, "lines": buffer})
+
+    for i, section in enumerate(sections):
+        if section["numeral"] is not None:
+            prev_section = sections[i - 1]
+            integer = roman_to_arabic(section["numeral"])
+
+            if integer == 1:
+                prev_titles = []
+
+                # iterate lines from the previous section
+                #  - bottom up, two at a time
+                for current, previous in zip(
+                    prev_section["lines"][::-1], prev_section["lines"][-2::-1]
+                ):
+                    # if the current line is not empty but the one above is
+                    #  we have a "title" line of some sort
+                    if current.strip() and not previous.strip():
+                        # assign it to the next highest title level
+                        prev_titles.append(current)
+                        prev_section["lines"].remove(current)
+
+                    # if we have two consecutive lines with content, we've
+                    #  reached the bottom of the previous section's text
+                    if current.strip() and previous.strip():
+                        break
+
+                if first_section:
+                    first_section = False
+                    prev_titles.reverse()
+                    # must have a top-level title
+                    section["title"] = prev_titles.pop(0)
+
+                    # DUBIOUS: if there's more than one title left, take a subtitle
+                    if len(prev_titles) > 1:
+                        section["subtitle"], *prev_titles = prev_titles
+
+                    prev_titles.reverse()
+
+                    titles = titles[: len(prev_titles)]
+
+                    titles.reverse()
+
+                section["prev_titles"] = dict(reversed(list(zip(titles, prev_titles))))
+
+            else:
+                # sanity check -- consecutive roman numeral sections should have
+                #  consecutive roman numerals (unless they are section I)
+                if roman_to_arabic(prev_section["numeral"]) != integer - 1:
+                    logging.warning(
+                        "Section numbering is not correct "
+                        f"({prev_section['numeral']=}, {section['numeral']=})"
+                        f"\n\t - {section['lines'][1]}..."
+                    )
+
+            # pick up section titles for roman-numeraled sections
+            # (Brothers Karamazov only)
+            for j, line in enumerate(section["lines"]):
+                # skip the first line, the last line, and empty lines
+                if j == 0 or j == len(section["lines"]) - 1 or not line.strip():
+                    continue
+
+                # if we have two conecutive lines with content, give up and move on
+                if section["lines"][j + 1].strip():
+                    break
+
+                # if we've got a line with blank lines on either side AND
+                #  where all the content is upper case, take it as a section title
+                if (
+                    not section["lines"][j - 1].strip()
+                    and not section["lines"][j + 1].strip()
+                    and re.sub("<[^<]+?>", "", line).upper()
+                    == re.sub("<[^<]+?>", "", line)
+                ):
+                    section["section_title"] = line.strip()
+                    break
+
+    return sections
+
+
+def markup_sections(sections):
+    first_section = True
+    buffer = ["<body>"]
+    section_attribs = {
+        "div1": {"type": "part", "n": 0},
+        "div2": {"type": "chapter", "n": 0},
+    }
+
+    def get_section_markup(section_type, heading_text):
+        section_attribs[section_type]["n"] += 1
+        attribs = " ".join(
+            f'{k}="{v}"' for k, v in section_attribs[section_type].items()
+        )
+        return f"<{section_type} {attribs}><head>{heading_text}</head>"
+
+    for section in sections:
+        if section["numeral"] is None:
+            front_matter = "\n".join(section["lines"]).strip()
+            if front_matter:
+                # <front/> section should be prepended so it goes before <body/>
+                buffer = ["<front><p>", front_matter, "</p></front>", ""] + buffer
+        else:
+            if "title" in section:
+                buffer.append(f'<head type="mainTitle">{section["title"]}</head>')
+            if "subtitle" in section:
+                buffer.append(f'<head type="subTitle">{section["subtitle"]}</head>')
+
+            chapter_title = section.get("prev_titles", {}).pop("chapter_title", None)
+            if "prev_titles" in section:
+                if first_section:
+                    has_chapters = len(section["prev_titles"]) > 1
+
+                if not first_section:
+                    if not has_chapters:
+                        buffer.append("</div2>\n")
+                    buffer.extend(
+                        [f"</{key}>" for key in reversed(section["prev_titles"])]
+                    )
+                first_section = False
+
+                if "div1" in section["prev_titles"]:
+                    # restart chapter-level numbering
+                    section_attribs["div2"]["n"] = 0
+
+                buffer.extend(
+                    [
+                        get_section_markup(key, val)
+                        for key, val in section["prev_titles"].items()
+                    ]
+                )
+
+                if not has_chapters:
+                    buffer.append("<div2>\n")
+
+                if chapter_title is not None:
+                    buffer.append(f'<head type="mainTitle">{chapter_title}</head>')
+
+            integer = roman_to_arabic(section["numeral"])
+            buffer.append(f'<div3 type="section" n="{integer}">')
+            buffer.append(f"<head>{section['numeral']}</head>")
+            if "section_title" in section:
+                buffer.append(f"<head>{section['section_title']}</head>")
+            buffer.extend(
+                f"<p>{line.strip()}</p>" if line.strip() else ""
+                for line in section["lines"]
+            )
+            buffer.append("</div3>\n")
+
+    buffer.append("</div2>\n")
+    buffer.append("</div1>\n")
+    buffer.append("</body>")
+    return "\n".join(buffer)
+
+
+if __name__ == "__main__":
+    # The following code is used for testing and development purposes only.
+    import sys
+
+    with open(sys.argv[1], "rt") as _fh:
+        text = _fh.read()
+
+    sections = parse_sections(text)
+
+    print("<TEI>\n")
+    print(markup_sections(sections))
+    print("</TEI>")
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-model
+  href="http://www.tei-c.org/release/xml/tei/custom/schema/relaxng/tei_all.rng"
+  type="application/xml" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<?xml-model
+  href="http://www.tei-c.org/release/xml/tei/custom/schema/relaxng/tei_all.rng"
+  type="application/xml" schematypens="http://purl.oclc.org/dsdl/schematron"?>
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title/>
+        <author/>
+      </titleStmt>
+      <editionStmt>
+        <edition/>
+        <respStmt>
+          <resp/>
+          <persName/>
+        </respStmt>
+      </editionStmt>
+      <publicationStmt/>
+      <sourceDesc/>
+    </fileDesc>
+  </teiHeader>
+  <text>
+    <body>
+      <head type="mainTitle">ПРЕСТУПЛЕНИЕ И НАКАЗАНИЕ</head>
+      <head type="subTitle">РОМАН В ШЕСТИ ЧАСТЯХ С ЭПИЛОГОМ</head>
+      <div1 type="part" n="1">
+        <head>ЧАСТЬ ПЕРВАЯ</head>
+        <div2>
+          <div3 type="section" n="1">
+            <head>I</head>
+            <p>В начале июля, в чрезвычайно жаркое время, под вечер, один молодой человек вышел из своей каморки, которую нанимал от жильцов в С—м переулке, на улицу и медленно, как бы в нерешимости, отправился к К—ну мосту.</p>
+            <p>Он благополучно избегнул встречи с своею хозяйкой на лестнице. Каморка его приходилась под самою кровлей высокого пятиэтажного дома и походила более на шкаф, чем на квартиру. Квартирная же хозяйка его, у которой он нанимал эту каморку с обедом и прислугой, помещалась одною лестницей ниже, в отдельной квартире, и каждый раз, при выходе на улицу, ему непременно надо было проходить мимо хозяйкиной кухни, почти всегда настежь отворенной на лестницу. И каждый раз молодой человек, проходя мимо, чувствовал какое-то болезненное и трусливое ощущение, которого стыдился и от которого морщился. Он был должен кругом хозяйке и боялся с нею встретиться.</p>
+            <p>Не то чтоб он был так труслив и забит, совсем даже напротив; но с некоторого времени он был в раздражительном и напряженном состоянии, похожем на ипохондрию. Он до того углубился в себя и уединился от всех, что боялся даже всякой встречи, не только встречи с хозяйкой. Он был задавлен бедностью; но даже стесненное положение перестало в последнее время тяготить его. Насущными делами своими он совсем перестал и не хотел заниматься. Никакой хозяйки, в сущности, он не боялся, что бы та ни замышляла против него. Но останавливаться на лестнице, слушать всякий вздор про всю эту обыденную дребедень, до которой ему нет никакого дела, все эти приставания о платеже, угрозы, жалобы, и при этом самому изворачиваться, извиняться, лгать, — нет уж, лучше проскользнуть как-нибудь кошкой по лестнице и улизнуть, чтобы никто не видал.</p>
+            <p>Впрочем, на этот раз страх встречи с своею кредиторшей даже его самого поразил по выходе на улицу.</p>
+            <p><said aloud="" direct="" who="" toWhom="">«На какое дело хочу покуситься и в то же время каких пустяков боюсь!</said> — подумал он с странною улыбкой. — <said aloud="" direct="" who="" toWhom="">Гм... да... всё в руках человека, и всё-то он мимо носу проносит, единственно от одной трусости... это уж аксиома... Любопытно, чего люди больше всего боятся? Нового шага, нового собственного слова они всего больше боятся... А впрочем, я слишком много болтаю. Оттого и ничего не делаю, что болтаю. Пожалуй, впрочем, и так: оттого болтаю, что ничего не делаю. Это я в этот последний месяц выучился болтать, лежа по целым суткам в углу и думая... о царе Горохе. Ну зачем я теперь иду? Разве я способен на это? Разве это серьезно? Совсем не серьезно. Так, ради фантазии сам себя тешу; игрушки! Да, пожалуй что и игрушки!»</said></p>
+            <p>На улице жара стояла страшная, к тому же духота, толкотня, всюду известка, леса, кирпич, пыль и та особенная летняя вонь, столь известная каждому петербуржцу, не имеющему возможности нанять дачу, — всё это разом неприятно потрясло и без того уже расстроенные нервы юноши. Нестерпимая же вонь из распивочных, которых в этой части города особенное множество, и пьяные, поминутно попадавшиеся, несмотря на буднее время, довершили отвратительный и грустный колорит картины. Чувство глубочайшего омерзения мелькнуло на миг в тонких чертах молодого человека. Кстати, он был замечательно хорош собою, с прекрасными темными глазами, темно-рус, ростом выше среднего, тонок и строен. Но скоро он впал как бы в глубокую задумчивость, даже, вернее сказать, как бы в какое-то забытье, и пошел, уже не замечая окружающего, да и не желая его замечать. Изредка только бормотал он что-то про себя, от своей привычки к монологам, в которой он сейчас сам себе признался. В эту же минуту он и сам сознавал, что мысли его порою мешаются и что он очень слаб: второй день как уж он почти совсем ничего не ел.</p>
+            <p>Он был до того худо одет, что иной, даже и привычный человек, посовестился бы днем выходить в таких лохмотьях на улицу. Впрочем, квартал был таков, что костюмом здесь было трудно кого-нибудь удивить. Близость Сенной, обилие известных заведений и, по преимуществу, цеховое и ремесленное население, скученное в этих серединных петербургских улицах и переулках, пестрили иногда общую панораму такими субъектами, что странно было бы и удивляться при встрече с иною фигурой. Но столько злобного презрения уже накопилось в душе молодого человека, что, несмотря на всю свою, иногда очень молодую, щекотливость, он менее всего совестился своих лохмотьев на улице. Другое дело при встрече с иными знакомыми или с прежними товарищами, с которыми вообще он не любил встречаться... А между тем, когда один пьяный, которого неизвестно почему и куда провозили в это время по улице в огромной телеге, запряженной огромною ломовою лошадью, крикнул ему вдруг, проезжая: <said aloud="" direct="" who="" toWhom="">«Эй ты, немецкий шляпник!»</said> — и заорал во всё горло, указывая на него рукой, — молодой человек вдруг остановился и судорожно схватился за свою шляпу. Шляпа эта была высокая, круглая, циммермановская, но вся уже изношенная, совсем рыжая, вся в дырах и пятнах, без полей и самым безобразнейшим углом заломившаяся на сторону. Но не стыд, а совсем другое чувство, похожее даже на испуг, охватило его.</p>
+            <p><said aloud="" direct="" who="" toWhom="">«Я так и знал!</said> — бормотал он в смущении, — <said aloud="" direct="" who="" toWhom="">я так и думал! Это уж всего сквернее! Вот эдакая какая-нибудь глупость, какая-нибудь пошлейшая мелочь, весь замысел может испортить! Да, слишком приметная шляпа... Смешная, потому и приметная... К моим лохмотьям непременно нужна фуражка, хотя бы старый блин какой-нибудь, а не этот урод. Никто таких не носит, за версту заметят, запомнят... главное, потом запомнят, ан и улика. Тут нужно быть как можно неприметнее... Мелочи, мелочи главное!.. Вот эти-то мелочи и губят всегда и всё...»</said></p>
+            <p>Идти ему было немного; он даже знал, сколько шагов от ворот его дома: ровно семьсот тридцать. Как-то раз он их сосчитал, когда уж очень размечтался. В то время он и сам еще не верил этим мечтам своим и только раздражал себя их безобразною, но соблазнительною дерзостью. Теперь же, месяц спустя, он уже начинал смотреть иначе и, несмотря на все поддразнивающие монологи о собственном бессилии и нерешимости, <said aloud="" direct="" who="" toWhom="">«безобразную»</said> мечту как-то даже поневоле привык считать уже предприятием, хотя всё еще сам себе не верил. Он даже шел теперь делать пробу своему предприятию, и с каждым шагом волнение его возрастало всё сильнее и сильнее.</p>
+            <p>С замиранием сердца и нервною дрожью подошел он к преогромнейшему дому, выходившему одною стеной на канаву, а другою в —ю улицу. Этот дом стоял весь в мелких квартирах и заселен был всякими промышленниками — портными, слесарями, кухарками, разными немцами, девицами, живущими от себя, мелким чиновничеством и проч. Входящие и выходящие так и шмыгали под обоими воротами и на обоих дворах дома. Тут служили три или четыре дворника. Молодой человек был очень доволен, не встретив ни которого из них, и неприметно проскользнул сейчас же из ворот направо на лестницу. Лестница была темная и узкая, <said aloud="" direct="" who="" toWhom="">«черная»</said>, но он всё уже это знал и изучил, и ему вся эта обстановка нравилась: в такой темноте даже и любопытный взгляд был неопасен. <said aloud="" direct="" who="" toWhom="">«Если о сю пору я так боюсь, что же было бы, если б и действительно как-нибудь случилось до самого дела дойти?..»</said> — подумал он невольно, проходя в четвертый этаж. Здесь загородили ему дорогу отставные солдаты-носильщики, выносившие из одной квартиры мебель. Он уже прежде знал, что в этой квартире жил один семейный немец, чиновник: <said aloud="" direct="" who="" toWhom="">«Стало быть, этот немец теперь выезжает, и, стало быть, в четвертом этаже, по этой лестнице и на этой площадке, остается, на некоторое время, только одна старухина квартира занятая. Это хорошо... на всякой случай...»</said> — подумал он опять и позвонил в старухину квартиру. Звонок брякнул слабо, как будто был сделан из жести, а не из меди. В подобных мелких квартирах таких домов почти всё такие звонки. Он уже забыл звон этого колокольчика, и теперь этот особенный звон как будто вдруг ему что-то напомнил и ясно представил... Он так и вздрогнул, слишком уж ослабели нервы на этот раз. Немного спустя дверь приотворилась на крошечную щелочку: жилица оглядывала из щели пришедшего с видимым недоверием, и только виднелись ее сверкавшие из темноты глазки. Но увидав на площадке много народу, она ободрилась и отворила совсем. Молодой человек переступил через порог в темную прихожую, разгороженную перегородкой, за которою была крошечная кухня. Старуха стояла перед ним молча и вопросительно на него глядела. Это была крошечная, сухая старушонка, лет шестидесяти, с вострыми и злыми глазками, с маленьким вострым носом и простоволосая. Белобрысые, мало поседевшие волосы ее были жирно смазаны маслом. На ее тонкой и длинной шее, похожей на куриную ногу, было наверчено какое-то фланелевое тряпье, а на плечах, несмотря на жару, болталась вся истрепанная и пожелтелая меховая кацавейка. Старушонка поминутно кашляла и кряхтела. Должно быть, молодой человек взглянул на нее каким-нибудь особенным взглядом, потому что и в ее глазах мелькнула вдруг опять прежняя недоверчивость.</p>
+            <p>— <said aloud="" direct="" who="" toWhom=""><persName>Раскольников</persName>, студент, был у вас назад тому месяц</said>, — поспешил пробормотать молодой человек с полупоклоном, вспомнив, что надо быть любезнее.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Помню, батюшка, очень хорошо помню, что вы были</said>, — отчетливо проговорила старушка, по-прежнему не отводя своих вопрошающих глаз от его лица.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Так вот-с... и опять, по такому же дельцу...</said> — продолжал <persName>Раскольников</persName>, немного смутившись и удивляясь недоверчивости старухи.</p>
+            <p><said aloud="" direct="" who="" toWhom="">«Может, впрочем, она и всегда такая, да я в тот раз не заметил»</said>, — подумал он с неприятным чувством.</p>
+            <p>Старуха помолчала, как бы в раздумье, потом отступила в сторону и, указывая на дверь в комнату, произнесла, пропуская гостя вперед:</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Пройдите, батюшка. </said></p>
+            <p>Небольшая комната, в которую прошел молодой человек, с желтыми обоями, геранями и кисейными занавесками на окнах, была в эту минуту ярко освещена заходящим солнцем. <said aloud="" direct="" who="" toWhom="">«И тогда, стало быть, так же будет солнце светить!..»</said> — как бы невзначай мелькнуло в уме <persName>Раскольникова</persName>, и быстрым взглядом окинул он всё в комнате, чтобы по возможности изучить и запомнить расположение. Но в комнате не было ничего особенного. Мебель, вся очень старая и из желтого дерева, состояла из дивана с огромною выгнутою деревянною спинкой, круглого стола овальной формы перед диваном, туалета с зеркальцем в простенке, стульев по стенам да двух-трех грошовых картинок в желтых рамках, изображавших немецких барышень с птицами в руках, — вот и вся мебель. В углу перед небольшим образом горела лампада. Всё было очень чисто: и мебель, и полы были оттерты под лоск; всё блестело. <said aloud="" direct="" who="" toWhom="">«Лизаветина работа»</said>, — подумал молодой человек. Ни пылинки нельзя было найти во всей квартире. <said aloud="" direct="" who="" toWhom="">«Это у злых и старых вдовиц бывает такая чистота»</said>, — продолжал про себя <persName>Раскольников</persName> и с любопытством покосился на ситцевую занавеску перед дверью во вторую, крошечную комнатку, где стояли старухины постель и комод и куда он еще ни разу не заглядывал. Вся квартира состояла из этих двух комнат.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Что угодно?</said> — строго произнесла старушонка, войдя в комнату и по-прежнему становясь прямо перед ним, чтобы глядеть ему прямо в лицо.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Заклад принес, вот-с!</said> — И он вынул из кармана старые плоские серебряные часы. На оборотной дощечке их был изображен глобус. Цепочка была стальная.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Да ведь и прежнему закладу срок. Еще третьего дня месяц как минул. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Я вам проценты еще за месяц внесу; потерпите. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">А в том моя добрая воля, батюшка, терпеть	или	вещь вашу теперь же продать. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Много ль за часы-то, <persName>Алена Ивановна</persName>? </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">А с пустяками ходишь, батюшка, ничего, почитай, не стоит. За	колечко вам прошлый раз два билетика внесла, а оно и купить-то	его новое у ювелира за полтора рубля можно. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Рубля-то четыре дайте, я выкуплю, отцовские. Я скоро деньги получу. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Полтора рубля-с и процент вперед, коли хотите-с. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Полтора рубля!</said> — вскрикнул молодой человек.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Ваша воля.</said> — И старуха протянула ему обратно часы. Молодой человек взял их и до того рассердился, что хотел было уже уйти; но тотчас одумался, вспомнив, что идти больше некуда и что он еще и за другим пришел.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Давайте!</said> — сказал он грубо.</p>
+            <p>Старуха полезла в карман за ключами и пошла в другую комнату за занавески. Молодой человек, оставшись один среди комнаты, любопытно прислушивался и соображал. Слышно было, как она отперла комод. <said aloud="" direct="" who="" toWhom="">«Должно быть, верхний ящик</said>, — соображал он. — <said aloud="" direct="" who="" toWhom="">Ключи она, стало быть, в правом кармане носит... Все на одной связке, в стальном кольце... И там один ключ есть всех больше, втрое, с зубчатою бородкой, конечно, не от комода... Стало быть, есть еще какая-нибудь шкатулка, али укладка... Вот это любопытно. У укладок всё такие ключи... А впрочем, как это подло всё...»</said></p>
+            <p>Старуха воротилась.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Вот-с, батюшка: коли по гривне в месяц с рубля, так за полтора рубля причтется с вас пятнадцать копеек, за месяц вперед-с. Да за два прежних рубля с вас еще причитается по сему же счету вперед двадцать копеек. А всего, стало быть, тридцать пять. Приходится же вам теперь всего получить за часы ваши рубль пятнадцать копеек. Вот получите-с. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Как! так уж теперь рубль пятнадцать копеек! </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Точно так-с. </said></p>
+            <p>Молодой человек спорить не стал и взял деньги. Он смотрел на старуху и не спешил уходить, точно ему еще хотелось что-то сказать или сделать, но как будто он и сам не знал, что именно...</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Я вам, <persName>Алена Ивановна</persName>, может быть, на днях, еще одну вещь принесу... серебряную... хорошую... папиросочницу одну... вот как от приятеля ворочу...</said> — Он смутился и замолчал.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Ну тогда и будем говорить, батюшка. </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Прощайте-с... А вы всё дома одни сидите, сестрицы-то нет?</said> — спросил он как можно развязнее, выходя в переднюю.</p>
+            <p>— <said aloud="" direct="" who="" toWhom="">А вам какое до нее, батюшка, дело? </said></p>
+            <p>— <said aloud="" direct="" who="" toWhom="">Да ничего особенного. Я так спросил.	Уж вы сейчас... Прощайте, <persName>Алена Ивановна</persName>!</said></p>
+            <p><persName>Раскольников</persName> вышел в решительном смущении. Смущение это всё более и более увеличивалось. Сходя по лестнице, он несколько раз даже останавливался, как будто чем-то внезапно пораженный. И наконец, уже на улице, он воскликнул:</p>
+            <p><said aloud="" direct="" who="" toWhom="">«О боже! как это всё отвратительно! И неужели, неужели я... нет, это вздор, это нелепость!</said> — прибавил он решительно. — <said aloud="" direct="" who="" toWhom="">И неужели такой ужас мог прийти мне в голову? На какую грязь способно, однако, мое сердце! Главное: грязно, пакостно, гадко, гадко!.. И я, целый месяц...»</said></p>
+            <p>Но он не мог выразить ни словами, ни восклицаниями своего волнения. Чувство бесконечного отвращения, начинавшее давить и мутить его сердце еще в то время, как он только шел к старухе, достигло теперь такого размера и так ярко выяснилось, что он не знал, куда деться от тоски своей. Он шел по тротуару как пьяный, не замечая прохожих и сталкиваясь с ними, и опомнился уже в следующей улице. Оглядевшись, он заметил, что стоит подле распивочной, в которую вход был с тротуара по лестнице вниз, в подвальный этаж. Из дверей, как раз в эту минуту, выходили двое пьяных и, друг друга поддерживая и ругая, взбирались на улицу. Долго не думая, <persName>Раскольников</persName> тотчас же спустился вниз. Никогда до сих пор не входил он в распивочные, но теперь голова его кружилась, и к тому же палящая жажда томила его. Ему захотелось выпить холодного пива, тем более что внезапную слабость свою он относил и к тому, что был голоден. Он уселся в темном и грязном углу, за липким столиком, спросил пива и с жадностию выпил первый стакан. Тотчас же всё отлегло, и мысли его прояснели. <said aloud="" direct="" who="" toWhom="">«Всё это вздор</said>, — сказал он с надеждой, — <said aloud="" direct="" who="" toWhom="">и нечем тут было смущаться! Просто физическое расстройство! Один какой-нибудь стакан пива, кусок сухаря</said>, — <said aloud="" direct="" who="" toWhom="">и вот, в один миг, крепнет ум, яснеет мысль, твердеют намерения! Тьфу, какое всё это ничтожество!..»</said> Ho, несмотря на этот презрительный плевок, он глядел уже весело, как будто внезапно освободясь от какого-то ужасного бремени, и дружелюбно окинул глазами присутствующих. Но даже и в эту минуту он отдаленно предчувствовал, что вся эта восприимчивость к лучшему была тоже болезненная.</p>
+                     </div3>
+        </div2>
+      </div1>
+    </body>
+  </text>
+</TEI>
+
+Алена Ивановна 
+Алены Ивановны
+Алене Ивановне
+Алену Ивановну
+Аленой Ивановной
+
+Афросиньюшка
+Афросиньюшки
+
+ахиллесовской
+
+Николай Дементьев
+Миколая Дементьева
+Миколка
+Миколки
+Миколке
+Миколку
+Миколкой
+Миколай
+Миколая
+Миколаю
+Миколаем
+Миколае
+Миколашка
+
+Дуклида
+Дуклиду
+
+Заметов Александр Григорьевич
+Заметов
+Заметова
+Заметову
+Заметовым
+Заметове
+Александр Григорьевич
+Александра Григорьевича
+Александру Григорьевичу
+Александром Григорьевичем
+Александре Григорьевиче
+Гоголя
+Наталья Егоровна
+Дарвина
+Дарье Францевне
+Дарьи Францевны
+Дарья Францевна
+Прасковья Павловна Зарницына
+Зарницыной
+Прасковьи Павловны
+Прасковью Павловну
+Пашенька
+Пашеньки
+Пашеньку
+Пашенькой
+Пашеньке
+поручик Потанчиков
+Зосимов
+Зосимова
+Зосимову
+Зосимовым
+Зосимове
+Пидерита
+Капернаумов
+Капернаумова
+Капернаумову
+Капернаумовым
+Капернаумове
+
+Кох
+Коха
+Кохом
+
+Лебезятников Андрей Семенович
+Лебезятникова
+Лебезятникову
+Лебезятниковым
+Лебезятникове
+Андрей Семенович
+Андрея Семеновича
+Андрею Семеновичу
+Андреем Семеновичем
+Андрее Семеновиче
+
+Лизавета Ивановна
+Лизавета
+Лизаветы
+Лизавету
+Лизавете
+Лизаветой
+Лизаветы Ивановны
+Лизавету Ивановну
+Лизавете Ивановне
+Лизаветой Ивановной
+
+
+Липпевехзель Амалия Людвиговна 
+Липпевехзель
+Амалией Людвиговной
+Амалия Ивановна 
+Амалии Ивановны
+Амалии Ивановне
+Амалией Ивановной
+Амалию Ивановну
+Амалия Федоровна 
+Амалии Федоровны
+Амалии Федоровне
+Амалию Федоровну
+Амалией Федоровно
+Амаль-Иван 
+Амаль
+
+Лужин Петр Петрович 
+Лужинская
+Лужин
+Лужина
+Лужину
+Лужине
+Лужиным
+Петр Петрович
+Петра Петровича
+Петру Петровичу
+Петром Петровичем
+Петре Петровиче
+
+Луиза  Ивановна
+Лавиза Ивановна
+Лавизу Ивановну
+Лавизе Ивановне
+Лавиза
+Лавизу
+Лавизы
+
+Семен Захарович Мармеладов
+Мармеладов
+Мармеладова
+Мармеладову
+Мармеладовым
+Мармеладовом
+Семен Захарович
+Семена Захаровича
+Семену Захаровичу
+Семеном Захаровичем
+Семене Захаровиче
+
+Катерина Ивановна Мармеладова
+Мармеладова
+Мармеладовой
+Катерина Ивановна
+Катерине Ивановне
+Катерину Ивановну
+Катериной Ивановной
+
+Полина Мармеладова
+Поля 
+Поли
+Поле
+Полей
+Поленька
+Поленькой
+Поленьке
+Полину Михайловну
+Полечка
+Полечке
+Полечки
+Полечкой
+Полечку
+
+Лида Мармеладова
+Лида
+Лиды
+Лиде
+Лиду
+Лидой
+Лидочка
+Лидочки
+Лидочке
+Лидочку
+Лидочкой 
+Лена 
+Леня
+Лени
+Леню
+Леней
+Лене
+
+Коля Мармеладов
+Коля
+Коле
+Колю
+Коли
+Колей
+
+Софья Семеновна Мармеладова
+Софья Семеновна 
+Софьи Семеновны
+Софье Семеновне
+Софью Семеновну
+Софьей Семеновной
+Соня
+Соне
+Сони
+Соней
+Соню
+Сонечка
+Сонечки
+Сонечку
+Сонечке
+Сонечкой
+Сонечкин 
+Софья Ивановна
+Софьей Ивановной
+Сонечка Мармеладова
+Сонечкина
+Сонечкиной
+
+Настасья 
+Настасьи
+Настасье
+Настасью
+Настасьей
+Настасьюшка
+Настасья Никифоровна
+Настасья Петровна
+Настасья Петрова
+Петрова
+Настенька
+
+Никодим Фомич
+Никодима Фомича
+Никодиму Фомичу
+Никодиме Фомиче
+Никодимом Фомичом
+
+Пестряков
+Пестрякова
+Пестрякову
+Пестрякове
+Пестряковым
+
+Порох Илья Петрович
+Порох
+Пороха
+Пороху
+Порохе
+Порохом
+Илья Петрович
+Ильи Петровича
+Илье Петровичу
+Ильей Петровичем
+Илье Петровиче
+
+Порфирий Петрович 
+Порфирия Петровича
+Порфирию Петровичу
+Порфирии Петровиче
+Порфирием Петровичем
+Порфирий
+Порфирию 
+Порфирии 
+Порфирием 
+
+Дмитрий Прокофьевич Разумихин
+Вразумихин
+Дмитрий Прокофьич
+Дмитрия Прокофьича
+Дмитрию Прокофьичу
+Дмитрии Прокофьиче
+Дмитрием Прокофьичем
+Разумихин
+Разумихина
+Разумихину
+Разумихине
+Разумихиным
+
+Родион Романович Раскольников
+Раскольников
+Раскольникова
+Раскольникову
+Раскольниковым
+Раскольникове
+Родион Романович
+Родиона Романовича
+Родиону Романовичу
+Родионом Романовичем
+Родионе Романовиче
+Родя
+Роди
+Роде
+Родей
+Роденька
+Роденьке
+Роденьки
+Роденькой
+Роденьку
+Родька
+Родьке
+Родьки
+Родькой
+Родьку
+Родион Романыч
+Родиону Романычу
+Родиона Романыча
+Родионе Романыче
+Родионом Романычем
+
+Авдотья Романовна Раскольникова
+Авдотья Романовна
+Авдотьи Романовны
+Авдотьей Романовной
+Авдотье Романовне
+Авдотью Романовну
+Дуня
+Дуни
+Дуней
+Дуне
+Дуню
+Дунечка
+Дунечки
+Дунечкой
+Дунечку
+Дунечке
+Дунечкиного
+Дунечкиной
+Дунечкино
+Дунечкинова
+Дунечкины
+Дунечкиных
+
+Пульхерия Александровна Раскольникова
+Пульхерия Александровна
+Пульхерии Александровны
+Пульхерию Александровну
+Пульхерии Александровне
+Пульхерией Александровной
+
+Гертруда Карловна Ресслих
+Гертруды Карловны Ресслих
+Гертруды Карловны
+
+Аркадий Иванович Свидригайлов
+Свидригайлов
+Свидригайлова
+Свидригайлову
+Свидригайлове
+Свидригайловым
+Аркадий Иванович
+Аркадия Ивановича
+Аркадию Ивановичу
+Аркадием Ивановичем
+Аркадии Ивановиче
+
+Марфа Петровна Свидригайлова 
+Марфа Петровна
+Марфы Петровны
+Марфу Петровну
+Марфе Петровне
+Марфой Петровной
+
+Тит Васильич
+
+Филипп
+Филиппа
+Филиппу
+Филиппе
+Филлипом
+
+Чебаров
+Чебарова
+Чебаровым
+Чебарову
+Чебарове
+Митька
+Митьки
+Митьке
+Митькой
+Митьку
+Митрей
+Митрея 
+Митреем 
+Митрею
+Митрее   
+Дмитрий
+Дмитрия
+Дмитрию
+Дмитрием
+Дмитрии
+Наполеон
+Наполеона
+Наполеону
+Наполеоном
+Наполеоне
+Ахиллес
+Ахиллесу
+Пушкин
+Пушкина
+Пушкину
+Пушкиным
+Пушкине
+Пушкинские
+Пушкинского
+Пушкинский
+Христа
+Христов
+ХристосХриста
+Христов
+Христос
+Шелопаева
+Шиллер
+Шиллера
+купец Юшин
+Фурье
+Харламов
+Харламова
+Херувимов
+Херувимову
+Толстяков
+Тулон
+Тулона
+Тургенев
+Федосья
+Федяева
+Теребьева
+Теребьеву
+Ромео
+Рубинштейн
+Руссо
+господина Рассудкина
+Рафаэля
+Радищев
+Нил Павлыч
+Ньютон
+Ньютоновы
+Параша
+Парашу
+Мак
+Льюиса
+Магометом 
+Марии
+Мария
+Ликург 
+Магомет
+Ливингстона
+Лазарь
+Лазаря
+Колька
+Катю
+Катя
+Кеплеровы
+Кире Персидском
+генерала Кобелева
+Кобылятниковым
+Иван Иванович
+Иван Михайлыч
+Ивана Афанасьевича
+Ивану Афанасьевичу
+Излер
+Иисус
+Иисусу
+Душкин
+Душкин
+Душкина
+Душкину
+Добролюбов
+Генриет
+Карль
+Бахуса
+Белинского
+Берг
+Вагнера
+Вахрушин
+Вахрушина

@@ -1,0 +1,15 @@
+,value
+tokens_masc,1241.0
+tokens_femn,407.0
+types_masc,185.0
+types_femn,95.0
+shared,60.0
+only_masc,125.0
+only_femn,35.0
+jaccard,0.2727272727272727
+spearman_shared,0.7801274469195365
+spearman_p,2.0309037149444238e-13
+neutral_share_masc,0.17566478646253023
+neutral_share_femn,0.18427518427518427
+perfective_share_masc,0.7735697018533441
+perfective_share_femn,0.8378378378378378
